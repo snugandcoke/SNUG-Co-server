@@ -59,6 +59,27 @@ def test_products_listing_is_card_sized(client):
     assert all(set(c) == TAXONOMY_FIELDS for c in data["categories"] + data["collections"])
 
 
+SQLI_PAYLOADS = [
+    "' OR '1'='1' --",
+    '" OR "1"="1" --',
+    "1 OR 1=1",
+    "' UNION SELECT NULL --",
+    "%' OR '1'='1",
+]
+
+
+@pytest.mark.parametrize("payload", SQLI_PAYLOADS)
+def test_products_listing_ignores_sql_injection_in_query_params(client, payload):
+    """/api/products takes no search param; it must return the full, unaffected catalog
+    and never leak a database error, regardless of what junk is passed as q."""
+    baseline = client.get("/api/products").get_json()
+    res = client.get("/api/products", query_string={"q": payload})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["products"] == baseline["products"]
+    assert len(data["products"]) == 23
+
+
 def test_product_detail_has_the_full_product_and_related_pieces(client):
     data = client.get("/api/products/kenya-bomber-jacket").get_json()
     assert set(data) == {"product", "category", "related", "images"}
@@ -477,6 +498,9 @@ def test_site_served_with_spa_fallback(tmp_path):
 def test_sitemap_and_robots(client):
     xml = client.get("/sitemap.xml").get_data(as_text=True)
     assert "/product/kenya-bomber-jacket" in xml and "/shop" in xml
+    assert "/shop/tracksuits" in xml
+    # Every seeded collection holds at least one published piece, so all three are indexable.
+    assert "/collections/kenya" in xml and "/collections/matchday" in xml and "/collections/his-and-hers" in xml
     assert "Sitemap:" in client.get("/robots.txt").get_data(as_text=True)
 
 
