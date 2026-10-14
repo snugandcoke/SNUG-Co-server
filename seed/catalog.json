@@ -4,7 +4,7 @@
       "id": "c1",
       "name": "Lounge sets",
       "slug": "lounge-sets",
-      "description": "Matching sets for slow mornings, errands and everything in between.",
+      "description": "Matching sets for slow mornings, errands and everything in between. Shop two-piece loungewear and short sets, made in Kenya.",
       "image": "colour-block-short-set-1",
       "sortOrder": 1
     },
@@ -12,7 +12,7 @@
       "id": "c2",
       "name": "Tracksuits",
       "slug": "tracksuits",
-      "description": "Effortless comfort. Elevated everyday dressing.",
+      "description": "Effortless comfort. Elevated everyday dressing. Shop two-piece tracksuit sets, made in Kenya.",
       "image": "green-tracksuit-1",
       "sortOrder": 2
     },
@@ -20,7 +20,7 @@
       "id": "c3",
       "name": "Jackets",
       "slug": "jackets",
-      "description": "Statement bombers, retro track jackets and made-to-order puff jackets.",
+      "description": "Statement bombers, retro track jackets and made-to-order puff jackets. Shop outerwear in Nairobi.",
       "image": "arsenal-retro-jacket-1",
       "sortOrder": 3
     },
@@ -28,7 +28,7 @@
       "id": "c4",
       "name": "Sweatshirts & tops",
       "slug": "sweatshirts",
-      "description": "Fleece sweatshirts, hoodies and jerseys.",
+      "description": "Fleece sweatshirts, hoodies and jerseys. Shop cosy layers, made in Kenya.",
       "image": "argentina-hoodie-1",
       "sortOrder": 4
     }
@@ -38,21 +38,21 @@
       "id": "k1",
       "name": "Kenya collection",
       "slug": "kenya",
-      "description": "Wear your roots.",
+      "description": "Wear your roots. Kenya-inspired streetwear, made at home.",
       "image": "kenya-bomber-jacket-1"
     },
     {
       "id": "k2",
       "name": "Matchday",
       "slug": "matchday",
-      "description": "Football-inspired pieces made for everyday wear.",
+      "description": "Football-inspired pieces made for everyday wear. Shop football streetwear in Kenya.",
       "image": "arsenal-retro-jacket-2"
     },
     {
       "id": "k3",
       "name": "His & Hers",
       "slug": "his-and-hers",
-      "description": "Style has no gender, and neither does comfort.",
+      "description": "Style has no gender, and neither does comfort. Shop unisex matching sets in Kenya.",
       "image": "colour-block-short-set-2"
     }
   ],
