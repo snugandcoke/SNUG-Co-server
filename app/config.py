@@ -86,8 +86,16 @@ def build_config(overrides=None):
         "TRUSTED_PROXIES": int(env("TRUSTED_PROXIES") or 0),
         "LOGIN_MAX_ATTEMPTS": 5,
         "LOGIN_WINDOW_SECONDS": 15 * 60,
+        # Longest a worker reuses a finished storefront API response (0 turns caching off). Catalog
+        # changes clear it at once on this instance; this bounds staleness on any other instance.
+        "PUBLIC_CACHE_SECONDS": int(env("PUBLIC_CACHE_SECONDS") or 30),
+        # Shared stamp file for cross-worker invalidation; empty picks one in the system temp dir.
+        "PUBLIC_CACHE_STAMP": env("PUBLIC_CACHE_STAMP") or "",
     }
     if overrides:
         config.update(overrides)
+        # Tests change the database directly between requests, so they opt in explicitly.
+        if overrides.get("TESTING"):
+            config["PUBLIC_CACHE_SECONDS"] = overrides.get("PUBLIC_CACHE_SECONDS", 0)
     config.setdefault("SQLALCHEMY_ENGINE_OPTIONS", engine_options(config["SQLALCHEMY_DATABASE_URI"]))
     return config

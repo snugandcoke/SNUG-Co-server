@@ -10,6 +10,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .cli import register_cli
 from .config import BASE_DIR, build_config, remote_database_host
+from . import public_cache
 from .errors import register_errors
 from .extensions import db, migrate
 from .routes import admin, auth, public, share, shopper
@@ -60,6 +61,7 @@ def create_app(test_config=None):
     if app.config["LOCAL_UPLOADS"]:
         Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
     db.init_app(app)
+    public_cache.init_app(app, db.session)
     migrate.init_app(app, db, render_as_batch=True, compare_type=True)
     register_errors(app)
     register_cli(app)
@@ -143,6 +145,13 @@ def create_app(test_config=None):
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        if (
+            request.path.startswith("/api/admin")
+            and request.method not in ("GET", "HEAD", "OPTIONS")
+            and response.status_code < 400
+        ):
+            # Belt and braces: commits to catalog tables already clear the cache (public_cache.py).
+            public_cache.invalidate()
         if request.path.startswith("/api/"):
             # Vercel's CDN caches what the API marks cacheable. Only the public storefront routes
             # opt in; everything else (admin, sign-in, bag, errors) is never stored anywhere.

@@ -16,7 +16,7 @@ def test_catalog_returns_seeded_products_in_client_shape(client):
     assert p["images"][0]["id"] == "the-black-tracksuit-1"
     assert {"priceKES", "newArrival", "madeToOrder", "sizesNote", "sortOrder"} <= set(p)
     assert "published" not in p  # admin-only field
-    assert client.get("/api/catalog").headers["Cache-Control"].startswith("public, max-age=60, s-maxage=60")
+    assert client.get("/api/catalog").headers["Cache-Control"] == "public, no-cache"
 
 
 def test_hidden_products_are_not_public(admin):
@@ -114,8 +114,10 @@ def test_public_routes_are_cdn_cacheable_and_nothing_else_is(admin, client):
     # `client` is signed in as the admin here: its session cookie must not ride on cacheable responses.
     for path in ("/api/settings", "/api/catalog", "/api/home", "/api/products", "/api/products/kenya-bomber-jacket"):
         res = client.get(path)
-        assert res.headers["Cache-Control"] == "public, max-age=60, s-maxage=60", path
-        assert res.headers["CDN-Cache-Control"] == "public, max-age=60, stale-while-revalidate=604800, stale-if-error=604800"
+        # Stored, but checked with the server before every use, so admin changes show at once.
+        assert res.headers["Cache-Control"] == "public, no-cache", path
+        assert res.headers["CDN-Cache-Control"] == "public, max-age=0, must-revalidate, stale-if-error=300"
+        assert res.headers["ETag"], path
         assert "Set-Cookie" not in res.headers, path
         assert "Cookie" not in res.headers.get("Vary", ""), path
 

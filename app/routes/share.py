@@ -73,9 +73,10 @@ COLLECTION_SEO = {
         "description": "Shop unisex matching sets and tracksuits in Kenya, made for him or her. Style has no gender at Snug & Co.",
     },
 }
-# Matches the public API's cache headers (public.py): a minute fresh, long stale-while-revalidate.
+# Link previews may be a minute old. They show prices, so a failing server can't keep an old
+# copy on the CDN for more than five minutes.
 CACHE = "public, max-age=60, s-maxage=60"
-CDN_CACHE = "public, max-age=60, stale-while-revalidate=604800, stale-if-error=604800"
+CDN_CACHE = "public, max-age=60, stale-if-error=300"
 
 
 def _site_url():
