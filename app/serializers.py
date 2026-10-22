@@ -146,7 +146,7 @@ def settings_json(row):
     }
 
 
-def taxonomy_json(item, admin=False):
+def taxonomy_json(item, admin=False, product_count=None):
     data = {
         "id": item.id if admin else f"{'c' if item.__tablename__ == 'categories' else 'k'}{item.id}",
         "name": item.name,
@@ -156,5 +156,5 @@ def taxonomy_json(item, admin=False):
         "sortOrder": item.sort_order,
     }
     if admin:
-        data["productCount"] = len(item.products)
+        data["productCount"] = len(item.products) if product_count is None else product_count
     return data
