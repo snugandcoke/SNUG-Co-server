@@ -16,7 +16,7 @@ from ..images import (
     process_image,
     product_folder,
 )
-from ..models import Category, Collection, Product, ProductImage, SiteSettings, with_relations
+from ..models import Category, Collection, Product, ProductImage, SiteSettings, product_collections, with_relations
 from ..security import login_required
 from ..serializers import SETTINGS_IMAGES, image_registry, product_json, settings_json, taxonomy_json
 from ..validation import clean_product, clean_settings, clean_taxonomy, slugify
@@ -156,7 +156,9 @@ def list_products():
     return jsonify(
         {
             "products": [product_json(p, admin=True) for p in products],
-            "images": image_registry(i.id for p in products for i in p.images),
+            "images": image_registry(
+                (i.id for p in products for i in p.images), loaded=[i for p in products for i in p.images]
+            ),
         }
     )
 
@@ -408,14 +410,40 @@ def list_images():
 # ---- Categories and collections ------------------------------------------
 
 
+def product_counts(model, ids):
+    """{id: number of products} in one grouped query, unpublished products included. Ids with no
+    products are left out (count 0)."""
+    if model is Category:
+        key = Product.category_id
+        query = db.session.query(key, func.count(Product.id))
+    else:
+        key = product_collections.c.collection_id
+        query = db.session.query(key, func.count(product_collections.c.product_id))
+    return dict(query.filter(key.in_(ids)).group_by(key).all()) if ids else {}
+
+
+def taxonomy_payload(model, items):
+    """Admin rows with product counts, plus metadata for their cover photos (only those photos)."""
+    counts = product_counts(model, [i.id for i in items])
+    return (
+        [taxonomy_json(i, admin=True, product_count=counts.get(i.id, 0)) for i in items],
+        image_registry(i.image_id for i in items),
+    )
+
+
 def register_taxonomy(path, model, label):
     def resolve_image(image_id):
         if image_id and db.session.get(ProductImage, image_id) is None:
             raise ValidationError({"image": "Choose a photo that exists."})
 
+    def one_item(item):
+        (data,), images = taxonomy_payload(model, [item])
+        return {"item": data, "images": images}
+
     def list_items():
         items = model.query.order_by(model.sort_order, model.id).all()
-        return jsonify({"items": [taxonomy_json(i, admin=True) for i in items]})
+        data, images = taxonomy_payload(model, items)
+        return jsonify({"items": data, "images": images})
 
     def create_item():
         cleaned = clean_taxonomy(request.get_json(silent=True))
@@ -434,7 +462,7 @@ def register_taxonomy(path, model, label):
         )
         db.session.add(item)
         db.session.commit()
-        return jsonify({"item": taxonomy_json(item, admin=True)}), 201
+        return jsonify(one_item(item)), 201
 
     def update_item(item_id):
         item = get_or_404(model, item_id, label)
@@ -452,7 +480,7 @@ def register_taxonomy(path, model, label):
             resolve_image(cleaned["image"])
             item.image_id = cleaned["image"]
         db.session.commit()
-        return jsonify({"item": taxonomy_json(item, admin=True)})
+        return jsonify(one_item(item))
 
     def delete_item(item_id):
         item = get_or_404(model, item_id, label)
