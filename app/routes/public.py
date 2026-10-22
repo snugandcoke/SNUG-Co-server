@@ -1,5 +1,10 @@
-from flask import Blueprint, jsonify
+from functools import wraps
 
+from flask import Blueprint, current_app, jsonify, request
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+
+from .. import public_cache
 from ..errors import ApiError
 from ..extensions import db
 from ..models import Category, Collection, Product, SiteSettings, with_relations
@@ -7,14 +12,45 @@ from ..serializers import image_registry, product_json, product_summary, setting
 
 bp = Blueprint("public", __name__, url_prefix="/api")
 
-# Browsers keep a copy for a minute. The CDN (Vercel honours CDN-Cache-Control) also serves stale
-# copies while it refreshes, so a sleeping server never blocks visitors. Browsers don't get the
-# stale allowance: a returning visitor never sees prices or pieces older than a minute.
-PUBLIC_CACHE = "public, max-age=60, s-maxage=60"
-CDN_CACHE = "public, max-age=60, stale-while-revalidate=604800, stale-if-error=604800"
+# Browsers may keep a copy but must check it with the server before each use (a 304 when nothing
+# changed, answered from the server's cache), so an admin change shows on the next page load. The
+# CDN (Vercel honours CDN-Cache-Control) does the same. While the server is failing it may serve
+# its copy for at most five minutes, so an outage can't keep old prices or stock on screen for long.
+PUBLIC_CACHE = "public, no-cache"
+CDN_CACHE = "public, max-age=0, must-revalidate, stale-if-error=300"
 
 HOME_NEW_ARRIVALS = 4
 RELATED_LIMIT = 4
+
+
+def cached(view):
+    """Serve this storefront route from the shared cache (see app/public_cache.py)."""
+
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        cache = public_cache.get_cache()
+        if not cache.enabled or request.method not in ("GET", "HEAD"):
+            return _conditional(view(*args, **kwargs))
+        body, generation = cache.get(request.path)
+        if body is not None:
+            response = current_app.response_class(body, mimetype="application/json")
+            response.headers["Cache-Control"] = PUBLIC_CACHE
+            response.headers["CDN-Cache-Control"] = CDN_CACHE
+            return _conditional(response)
+        response = view(*args, **kwargs)
+        # Only complete, public answers: never errors, never anything that sets a cookie.
+        if response.status_code == 200 and "Set-Cookie" not in response.headers:
+            cache.put(request.path, generation, response.get_data())
+        return _conditional(response)
+
+    return wrapper
+
+
+def _conditional(response):
+    if response.status_code == 200:
+        response.add_etag()
+        response.make_conditional(request)
+    return response
 
 
 def _public(payload):
@@ -39,15 +75,38 @@ def _loaded_images(products):
 
 @bp.get("/health")
 def health():
+    """Liveness: the process answers. Doesn't touch the database, so a database outage doesn't
+    restart the web process."""
     return jsonify({"status": "ok"})
 
 
+@bp.get("/ready")
+def ready():
+    """Readiness: the database answers a trivial query, so the app can serve real traffic. Cloudinary
+    isn't checked here (a check would need an upload or a paid call); see the server README.
+    Never cached, and the error text is generic so no internal detail leaks."""
+    try:
+        db.session.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        db.session.rollback()
+        current_app.logger.exception("Readiness check failed: database did not answer")
+        response = jsonify({"status": "unavailable", "database": "unavailable"})
+        status = 503
+    else:
+        response = jsonify({"status": "ready", "database": "ok"})
+        status = 200
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
 @bp.get("/settings")
+@cached
 def settings():
     return _public(settings_json(db.session.get(SiteSettings, 1)))
 
 
 @bp.get("/catalog")
+@cached
 def catalog():
     """Full published catalog. The shop now loads /home, /products and /products/<slug>; this stays
     for pages still open from an older build."""
@@ -69,6 +128,7 @@ def catalog():
 
 
 @bp.get("/home")
+@cached
 def home():
     """Only what the home page shows: new arrivals, category tiles and the His & Hers pair."""
     products = _published()
@@ -92,6 +152,7 @@ def home():
 
 
 @bp.get("/products")
+@cached
 def products():
     """Card-sized data for every published product: the shop grid, search and the bag."""
     items = _published()
@@ -120,6 +181,7 @@ def related_to(product, candidates, limit=RELATED_LIMIT):
 
 
 @bp.get("/products/<slug>")
+@cached
 def product_detail(slug):
     """One product with everything its page needs, plus a few related pieces."""
     items = _published()

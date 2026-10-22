@@ -112,7 +112,8 @@ def product_summary(p):
 
 
 def order_check(p):
-    """What an order is checked against right before WhatsApp opens: never cached."""
+    """What an order is checked against right before WhatsApp opens: never cached. The choices are
+    included so a customer's colour, size or option can be checked against what's offered now."""
     return {
         "id": f"p{p.id}",
         "slug": p.slug,
@@ -120,6 +121,10 @@ def order_check(p):
         "priceKES": p.price_kes,
         "availability": p.availability,
         "madeToOrder": p.made_to_order,
+        "colors": p.colors or None,
+        "sizes": p.sizes or None,
+        "sizesNote": p.sizes_note,
+        "options": p.options or [],
     }
 
 

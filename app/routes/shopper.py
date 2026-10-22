@@ -82,6 +82,8 @@ def respond(state, changed=False):
                     "size": line.get("size"),
                     "options": line.get("o") or {},
                     "quantity": line["q"],
+                    # Why this line's choices no longer fit the piece, by field. Empty when they do.
+                    "issues": choice_issues(products[line["p"]], line.get("color"), line.get("size"), line.get("o") or {}),
                 }
                 for line in cart
             ],
@@ -124,35 +126,72 @@ def clean_quantity(value):
     return value
 
 
-def clean_choices(product, body):
-    """The colour, size and options for a cart line, checked against the product."""
-    errors = {}
-    colors = [c["name"] for c in product.colors or []]
-    color = body.get("color")
-    if colors and color not in colors:
-        errors["color"] = "Choose a colour to continue."
-    size = body.get("size")
-    if product.sizes and size not in product.sizes:
-        errors["size"] = "Choose a size to continue."
-
+def choices_from_body(product, body):
+    """The colour, size and options a customer sent, in the form the cart keeps. A choice the
+    product has no list for is dropped; a value the product doesn't offer is kept, so
+    choice_issues can report it."""
+    color = (body.get("color") or None) if product.colors else None
+    size = (body.get("size") or None) if product.sizes else None
     sent = body.get("options") if isinstance(body.get("options"), dict) else {}
     options = {}
     for option in product.options or []:
         name = option["name"]
         value = sent.get(name)
         value = value.strip() if isinstance(value, str) else ""
-        if option.get("type") == "text":
-            if len(value) > MAX_TEXT:
-                errors[f"option:{name}"] = f"Use up to {MAX_TEXT} characters."
-        elif value and value not in option.get("values", []):
-            errors[f"option:{name}"] = f"Choose a {name.lower()}."
-        if option.get("required") and not value:
-            errors[f"option:{name}"] = f"Choose a {name.lower()}." if option.get("type") != "text" else f"Tell us the {name.lower()}."
         if value:
             options[name] = value
-    if errors:
-        raise ValidationError(errors)
-    return (color if colors else None), (size if product.sizes else None), options
+    return color, size, options
+
+
+def choice_issues(product, color, size, options):
+    """Why a colour, size and options no longer fit the product, by field. Empty when they do.
+    Checked against the product as it is now, so a choice an admin removed or changed is reported."""
+    issues = {}
+    colors = [c["name"] for c in product.colors or []]
+    if colors:
+        if color is None:
+            issues["color"] = "Choose a colour to continue."
+        elif color not in colors:
+            issues["color"] = "That colour is no longer available. Choose another."
+    elif color is not None:
+        issues["color"] = "This piece no longer has colour choices."
+    if product.sizes:
+        if size is None:
+            issues["size"] = "Choose a size to continue."
+        elif size not in product.sizes:
+            issues["size"] = "That size is no longer available. Choose another."
+    elif size is not None:
+        issues["size"] = "This piece no longer has size choices."
+
+    offered = {option["name"] for option in product.options or []}
+    for name in options:
+        if name not in offered:
+            issues[f"option:{name}"] = f"{name} is no longer offered."
+    for option in product.options or []:
+        name = option["name"]
+        value = options.get(name, "")
+        key = f"option:{name}"
+        label = name.lower()
+        if option.get("type") == "text":
+            if not value and option.get("required"):
+                issues[key] = f"Tell us the {label}."
+            elif len(value) > MAX_TEXT:
+                issues[key] = f"Use up to {MAX_TEXT} characters."
+        elif not value:
+            if option.get("required"):
+                issues[key] = f"Choose a {label}."
+        elif value not in option.get("values", []):
+            issues[key] = f"That {label} is no longer available. Choose another."
+    return issues
+
+
+def clean_choices(product, body):
+    """The colour, size and options for a cart line, checked against the product now."""
+    color, size, options = choices_from_body(product, body)
+    issues = choice_issues(product, color, size, options)
+    if issues:
+        raise ValidationError(issues)
+    return color, size, options
 
 
 def same_choices(line, color, size, options):
@@ -174,6 +213,44 @@ def check_products():
     ids = [pk for pk in map(parse_public_id, raw) if pk]
     found = published(ids)
     response = jsonify({"products": {f"p{i}": order_check(p) for i, p in found.items()}})
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@bp.post("/check")
+def check_order():
+    """Checks pieces the customer is about to order, each with its choices ({"items": [{productId,
+    color, size, options}]}). Prices and availability come from the database; the choices are checked
+    against the piece as it is now. Nothing is saved. Hidden or deleted pieces come back with
+    orderable false and no entry in products."""
+    body = request.get_json(silent=True)
+    items = body.get("items") if isinstance(body, dict) else None
+    if not isinstance(items, list) or not 1 <= len(items) <= MAX_LINES:
+        raise ApiError(422, f"Check between 1 and {MAX_LINES} pieces at a time.")
+    parsed = []
+    for item in items:
+        pk = parse_public_id(item.get("productId")) if isinstance(item, dict) else None
+        if pk is None:
+            raise ApiError(422, "Send each piece with its public id.")
+        parsed.append((pk, item))
+    found = published([pk for pk, _ in parsed])
+
+    products, results = {}, []
+    for pk, item in parsed:
+        product = found.get(pk)
+        if product is None:
+            results.append({"productId": f"p{pk}", "orderable": False, "issues": {}})
+            continue
+        color, size, options = choices_from_body(product, item)
+        products[f"p{product.id}"] = order_check(product)
+        results.append(
+            {
+                "productId": f"p{product.id}",
+                "orderable": product.availability not in UNORDERABLE,
+                "issues": choice_issues(product, color, size, options),
+            }
+        )
+    response = jsonify({"products": products, "items": results})
     response.headers["Cache-Control"] = "private, no-store"
     return response
 
@@ -242,9 +319,40 @@ def find_line(state, key):
 
 @bp.patch("/cart/<key>")
 def update_cart_line(key):
+    """Change a line's quantity, its choices, or both. New choices are checked like an add; if they
+    match another line, the two lines merge."""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        raise ApiError(400, "Send the quantity or your new choices.")
     state = load_state()
     line = find_line(state, key)
-    line["q"] = clean_quantity((request.get_json(silent=True) or {}).get("quantity"))
+    changes_choices = any(name in body for name in ("color", "size", "options"))
+    if "quantity" in body or not changes_choices:
+        line["q"] = clean_quantity(body.get("quantity"))
+    if changes_choices:
+        product = published([line["p"]]).get(line["p"])
+        if product is None:
+            raise ApiError(404, "That piece isn’t available.")
+        if product.availability in UNORDERABLE:
+            raise ApiError(409, "That piece can’t be ordered right now.")
+        color, size, options = clean_choices(product, body)
+        twin = next(
+            (other for other in state["c"] if other["k"] != line["k"] and other["p"] == line["p"]
+             and same_choices(other, color, size, options)),
+            None,
+        )
+        if twin is not None:
+            twin["q"] = min(MAX_QUANTITY, twin["q"] + line["q"])
+            state["c"] = [other for other in state["c"] if other["k"] != line["k"]]
+        else:
+            for name in ("color", "size", "o"):
+                line.pop(name, None)
+            if color:
+                line["color"] = color
+            if size:
+                line["size"] = size
+            if options:
+                line["o"] = options
     return respond(state, changed=True)
 
 

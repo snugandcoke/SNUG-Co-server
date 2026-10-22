@@ -2,6 +2,7 @@ from collections import namedtuple
 
 from flask import Blueprint, current_app, jsonify, request
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
 from ..errors import ApiError, ValidationError
 from ..extensions import db
@@ -390,11 +391,16 @@ def delete_image(product_id, image_id):
 @bp.get("/images")
 def list_images():
     """All photos, for cover pickers."""
-    rows = ProductImage.query.order_by(ProductImage.product_id, ProductImage.position).all()
+    # The product is loaded with the photos, so naming each row needs no query of its own.
+    rows = (
+        ProductImage.query.options(joinedload(ProductImage.product))
+        .order_by(ProductImage.product_id, ProductImage.position)
+        .all()
+    )
     return jsonify(
         {
             "images": [{"id": r.id, "alt": r.alt, "product": r.product.name} for r in rows],
-            "registry": image_registry(r.id for r in rows),
+            "registry": image_registry((r.id for r in rows), loaded=rows),
         }
     )
 

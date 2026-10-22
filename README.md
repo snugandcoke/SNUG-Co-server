@@ -202,3 +202,37 @@ cd server && FLASK_APP=wsgi.py flask create-admin --email you@example.com
 ```
 
 Then sign in at `/admin`, add categories (a product needs one), then products and photos.
+
+### Health and readiness
+
+| Endpoint | Answers | Database | Use it for |
+| --- | --- | --- | --- |
+| `GET /api/health` | `200 {"status": "ok"}` while the Flask/Gunicorn process is alive | not touched | **Render's health-check target.** A database outage must not restart the web process. |
+| `GET /api/ready` | `200 {"status": "ready", "database": "ok"}` when PostgreSQL answers a `SELECT 1`; otherwise `503 {"status": "unavailable", "database": "unavailable"}` | checked | Monitoring and deploy checks. Not an auto-restart target: during a database outage every instance would restart and none would serve, which makes things worse. |
+
+Both answer `Cache-Control: no-store`. `/api/ready` does not test Cloudinary. A Cloudinary check would need an upload or a paid call, so it is not part of readiness. Cloudinary failures appear as a `503` on photo uploads only.
+
+### Production facts from the code
+
+These are set by tracked code or documentation, not by a dashboard:
+
+- Server dependencies: `gunicorn>=23`, `Flask>=3.1,<4`, `Flask-SQLAlchemy>=3.1,<4`, `psycopg[binary]>=3.2` for PostgreSQL. No `gunicorn.conf.py`, `Procfile` or Dockerfile is tracked.
+- Database URL: `postgres://` and `postgresql://` are rewritten to `postgresql+psycopg://`. Hosts ending in `.supabase.co` or `.supabase.com` require TLS (`sslmode=require`) unless the URL sets `sslmode`.
+- Connection pool (SQLAlchemy defaults, plus the options in `app/config.py`): `pool_pre_ping=True`, `pool_recycle=300` seconds, `connect_timeout=10` seconds. The defaults allow 5 connections plus 10 overflow per Gunicorn worker process, so the ceiling is about 15 connections per worker.
+- Rate limits for sign-in are kept in memory by each worker. With several workers, the effective limit is multiplied, and a restart resets it.
+- Local development only: `FLASK_DEBUG=1` enables local photo storage. Render refuses it.
+
+### Still to verify in the dashboards
+
+These are not in the repository and must be read from the hosting dashboards. Nothing below is a known value:
+
+- Render: plan, region, the actual start command, the Gunicorn worker count, the Gunicorn timeout (not set in the repo, so the Gunicorn default applies unless the dashboard sets one), the health-check path (should be `/api/health`), the deployed branch, and whether a pre-deploy `flask db upgrade` is configured.
+- Vercel: the production branch and the environment variable names set for the client build.
+- Supabase: the plan, the connection limit for that plan, whether the app uses the direct or the pooled connection string, and backup retention.
+- Cloudinary: whether backups are enabled on the account.
+
+Record each answer here once confirmed, with the date.
+
+### Legacy `render.yaml` (not the deployment definition)
+
+A `render.yaml` sits in the project folder above both repositories. **It is not the current deployment definition and must not be applied.** It describes an older setup (a single Render web service, a 1 GB disk with `UPLOAD_DIR`, and a Render-hosted PostgreSQL database). Production uses Vercel, Render running this server only, Supabase, and Cloudinary, as described above. No runtime code, deployment script, build configuration or tracked deployment definition in either repository uses it; the only tracked references are the warnings in these READMEs. Applying it as a Render Blueprint would create new services, a disk and a database. Remove it once the production configuration above is verified.

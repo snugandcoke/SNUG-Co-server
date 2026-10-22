@@ -10,9 +10,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .cli import register_cli
 from .config import BASE_DIR, build_config, remote_database_host
+from . import public_cache
 from .errors import register_errors
 from .extensions import db, migrate
-from .routes import admin, auth, public, shopper
+from .routes import admin, auth, public, share, shopper
 from .security import AdminSessionInterface, csrf_guard
 
 # Shorter keys are guessable, and a known key lets anyone forge an admin session.
@@ -60,6 +61,7 @@ def create_app(test_config=None):
     if app.config["LOCAL_UPLOADS"]:
         Path(app.config["UPLOAD_DIR"]).mkdir(parents=True, exist_ok=True)
     db.init_app(app)
+    public_cache.init_app(app, db.session)
     migrate.init_app(app, db, render_as_batch=True, compare_type=True)
     register_errors(app)
     register_cli(app)
@@ -77,6 +79,7 @@ def create_app(test_config=None):
     app.register_blueprint(auth.bp)
     app.register_blueprint(admin.bp)
     app.register_blueprint(shopper.bp)
+    app.register_blueprint(share.bp)
 
     @app.get("/uploads/<path:filename>")
     def uploads(filename):
@@ -91,16 +94,22 @@ def create_app(test_config=None):
 
     @app.get("/robots.txt")
     def robots():
-        body = f"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api\nDisallow: /cart\nDisallow: /wishlist\n\nSitemap: {site_url()}/sitemap.xml\n"
+        body = f"User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /api\nDisallow: /share\nDisallow: /cart\nDisallow: /wishlist\n\nSitemap: {site_url()}/sitemap.xml\n"
         return app.response_class(body, mimetype="text/plain")
 
     @app.get("/sitemap.xml")
     def sitemap():
-        from .models import Category, Product
+        from .models import Category, Collection, Product
 
         base = site_url()
         urls = [(f"{base}{p}", None) for p in ("/", "/shop", "/about", "/contact", "/shipping-and-orders")]
         urls += [(f"{base}/shop/{c.slug}", None) for c in Category.query.all()]
+        # Only collections that actually hold a published piece - no empty landing pages indexed.
+        urls += [
+            (f"{base}/collections/{c.slug}", None)
+            for c in Collection.query.all()
+            if any(p.published for p in c.products)
+        ]
         urls += [
             (f"{base}/product/{p.slug}", p.updated_at.date().isoformat())
             for p in Product.query.filter_by(published=True).all()
@@ -116,7 +125,7 @@ def create_app(test_config=None):
     @app.get("/", defaults={"path": ""})
     @app.get("/<path:path>")
     def site(path):
-        if path.split("/", 1)[0] in ("api", "uploads") or not (dist / "index.html").exists():
+        if path.split("/", 1)[0] in ("api", "uploads", "share") or not (dist / "index.html").exists():
             abort(404)
         target = (dist / path).resolve()
         if path and target.is_file() and dist.resolve() in target.parents:
@@ -136,6 +145,13 @@ def create_app(test_config=None):
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        if (
+            request.path.startswith("/api/admin")
+            and request.method not in ("GET", "HEAD", "OPTIONS")
+            and response.status_code < 400
+        ):
+            # Belt and braces: commits to catalog tables already clear the cache (public_cache.py).
+            public_cache.invalidate()
         if request.path.startswith("/api/"):
             # Vercel's CDN caches what the API marks cacheable. Only the public storefront routes
             # opt in; everything else (admin, sign-in, bag, errors) is never stored anywhere.

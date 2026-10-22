@@ -275,6 +275,7 @@ def test_bag_carries_current_prices_and_availability(admin):
     assert state["products"][pid] == {
         "id": pid, "slug": "green-tracksuit", "name": product["name"], "priceKES": 6100,
         "availability": "low-stock", "madeToOrder": product["madeToOrder"],
+        "colors": product["colors"], "sizes": product["sizes"], "sizesNote": product["sizesNote"], "options": product["options"],
     }
 
 
@@ -309,3 +310,165 @@ def test_quick_changes_in_order_end_in_the_right_state(shopper):
     for method in ("put", "delete", "put", "delete", "put"):
         getattr(client, method)(f"/api/shopper/wishlist/{sized['id']}", headers=SHOP)
     assert client.get("/api/shopper").get_json()["wishlist"] == [sized["id"]]
+
+
+# ---- Choices checked against the piece as it is now -----------------------
+
+
+def admin_edit(client, product_id, body):
+    """Change a piece as the admin, the way a shop owner would, then sign out again."""
+    client.post("/api/admin/login", json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD}, headers=HEADERS)
+    res = client.patch(f"/api/admin/products/{product_id[1:]}", json=body, headers=HEADERS)
+    client.post("/api/admin/logout", headers=HEADERS)
+    assert res.status_code == 200, res.get_json()
+
+
+def choose(product, **choices):
+    """A cart body for this piece with its first colour and size, unless others are given."""
+    body = {"productId": product["id"], "quantity": 1}
+    if product["colors"]:
+        body["color"] = product["colors"][0]["name"]
+    if product["sizes"]:
+        body["size"] = product["sizes"][0]
+    body.update(choices)
+    return body
+
+
+def bag_line(client):
+    return client.get("/api/shopper").get_json()["cart"][0]
+
+
+def test_unchanged_valid_selection_has_no_issues(shopper):
+    client, sized, choice, _ = shopper
+    client.post("/api/shopper/cart", json=full_line(sized), headers=SHOP)
+    assert bag_line(client)["issues"] == {}
+    check = client.post(
+        "/api/shopper/check",
+        json={"items": [{"productId": sized["id"], "color": sized["colors"][0]["name"], "size": sized["sizes"][0]}]},
+        headers=SHOP,
+    )
+    assert check.get_json()["items"] == [{"productId": sized["id"], "orderable": True, "issues": {}}]
+
+
+def test_removed_colour_is_reported_on_the_bag_and_at_checkout(shopper):
+    client, sized, _, _ = shopper
+    gone, kept = sized["colors"][0]["name"], sized["colors"][1]
+    client.post("/api/shopper/cart", json=full_line(sized), headers=SHOP)
+    admin_edit(client, sized["id"], {"colors": [kept]})
+
+    assert bag_line(client)["issues"] == {"color": "That colour is no longer available. Choose another."}
+    check = client.post(
+        "/api/shopper/check",
+        json={"items": [{"productId": sized["id"], "color": gone, "size": sized["sizes"][0]}]},
+        headers=SHOP,
+    ).get_json()
+    assert check["items"][0]["issues"] == {"color": "That colour is no longer available. Choose another."}
+    assert check["products"][sized["id"]]["colors"] == [kept]
+
+
+def test_removed_size_is_reported_on_the_bag_and_at_checkout(shopper):
+    client, sized, _, _ = shopper
+    gone = sized["sizes"][0]
+    client.post("/api/shopper/cart", json=full_line(sized), headers=SHOP)
+    admin_edit(client, sized["id"], {"sizes": sized["sizes"][1:]})
+
+    assert bag_line(client)["issues"] == {"size": "That size is no longer available. Choose another."}
+    check = client.post(
+        "/api/shopper/check",
+        json={"items": [{"productId": sized["id"], "color": sized["colors"][0]["name"], "size": gone}]},
+        headers=SHOP,
+    ).get_json()
+    assert check["items"][0]["issues"] == {"size": "That size is no longer available. Choose another."}
+
+
+def test_removed_option_and_removed_option_value_are_reported(shopper):
+    client, _, choice, _ = shopper
+    option = next(o for o in choice["options"] if o.get("values"))
+    name, value = option["name"], option["values"][0]
+    client.post("/api/shopper/cart", json=choose(choice, options={name: value}), headers=SHOP)
+    assert bag_line(client)["issues"] == {}
+
+    admin_edit(client, choice["id"], {"options": [{**o, "values": o["values"][1:]} if o["name"] == name else o for o in choice["options"]]})
+    assert bag_line(client)["issues"] == {f"option:{name}": f"That {name.lower()} is no longer available. Choose another."}
+
+    admin_edit(client, choice["id"], {"options": [o for o in choice["options"] if o["name"] != name]})
+    assert bag_line(client)["issues"] == {f"option:{name}": f"{name} is no longer offered."}
+
+
+def test_removed_required_choice_asks_the_customer_to_choose_again(shopper):
+    client, sized, _, _ = shopper
+    client.post("/api/shopper/cart", json=full_line(sized), headers=SHOP)
+    admin_edit(client, sized["id"], {"colors": []})
+    # The line still holds a colour the piece no longer has colours for.
+    assert bag_line(client)["issues"] == {"color": "This piece no longer has colour choices."}
+
+
+def test_checkout_check_ignores_client_price_and_checks_every_choice(shopper):
+    client, sized, choice, _ = shopper
+    body = {"items": [{"productId": sized["id"], "color": "Purple", "size": "XXL", "priceKES": 1, "orderable": True}]}
+    res = client.post("/api/shopper/check", json=body, headers=SHOP)
+    assert res.status_code == 200
+    assert res.headers["Cache-Control"] == "private, no-store"
+    item = res.get_json()["items"][0]
+    assert item["issues"] == {
+        "color": "That colour is no longer available. Choose another.",
+        "size": "That size is no longer available. Choose another.",
+    }
+    assert res.get_json()["products"][sized["id"]]["priceKES"] != 1
+
+    missing = client.post("/api/shopper/check", json={"items": [{"productId": sized["id"]}]}, headers=SHOP).get_json()
+    assert missing["items"][0]["issues"] == {
+        "color": "Choose a colour to continue.",
+        "size": "Choose a size to continue.",
+    }
+
+
+def test_unpublished_and_sold_out_pieces_are_not_orderable(shopper):
+    client, sized, choice, _ = shopper
+    admin_edit(client, sized["id"], {"published": False})
+    admin_edit(client, choice["id"], {"availability": "sold-out"})
+    body = {"items": [{"productId": sized["id"]}, {"productId": choice["id"]}]}
+    data = client.post("/api/shopper/check", json=body, headers=SHOP).get_json()
+    hidden, sold = data["items"]
+    assert hidden == {"productId": sized["id"], "orderable": False, "issues": {}}
+    assert sized["id"] not in data["products"]
+    assert sold["orderable"] is False and data["products"][choice["id"]]["availability"] == "sold-out"
+
+
+def test_check_requires_the_shop_header_and_a_list_of_pieces(shopper):
+    client, sized, _, _ = shopper
+    item = {"productId": sized["id"]}
+    assert client.post("/api/shopper/check", json={"items": [item]}).status_code == 403
+    assert client.post("/api/shopper/check", json={"items": []}, headers=SHOP).status_code == 422
+    assert client.post("/api/shopper/check", json={"items": [{"productId": "nonsense"}]}, headers=SHOP).status_code == 422
+    assert client.post("/api/shopper/check", json={"items": [item] * 21}, headers=SHOP).status_code == 422
+    assert client.post("/api/shopper/check", json={"items": "p1"}, headers=SHOP).status_code == 422
+
+
+def test_changing_choices_in_the_bag_is_checked_and_merges_identical_lines(shopper):
+    client, sized, _, _ = shopper
+    cream, black = sized["colors"][0]["name"], sized["colors"][1]["name"]
+    size = sized["sizes"][0]
+    first = client.post("/api/shopper/cart", json=full_line(sized), headers=SHOP).get_json()["cart"][0]
+    client.post("/api/shopper/cart", json={**full_line(sized), "color": black}, headers=SHOP)
+
+    bad = client.patch(f"/api/shopper/cart/{first['key']}", json={"color": "Purple", "size": size, "options": {}}, headers=SHOP)
+    assert bad.status_code == 422 and "color" in bad.get_json()["fields"]
+
+    merged = client.patch(f"/api/shopper/cart/{first['key']}", json={"color": black, "size": size, "options": {}}, headers=SHOP)
+    lines = merged.get_json()["cart"]
+    assert len(lines) == 1 and lines[0]["color"] == black and lines[0]["quantity"] == 2
+
+    quantity = client.patch(f"/api/shopper/cart/{lines[0]['key']}", json={"quantity": 3}, headers=SHOP)
+    assert quantity.get_json()["cart"][0]["quantity"] == 3
+    assert client.patch(f"/api/shopper/cart/{lines[0]['key']}", json={}, headers=SHOP).status_code == 422
+
+
+def test_bag_choice_change_is_refused_for_a_sold_out_piece(shopper):
+    client, sized, _, _ = shopper
+    client.post("/api/shopper/cart", json=full_line(sized), headers=SHOP)
+    key = bag_line(client)["key"]
+    admin_edit(client, sized["id"], {"availability": "sold-out"})
+    res = client.patch(f"/api/shopper/cart/{key}", json={"color": sized["colors"][1]["name"], "size": sized["sizes"][0]}, headers=SHOP)
+    assert res.status_code == 409
+    assert "can’t be ordered" in res.get_json()["error"]

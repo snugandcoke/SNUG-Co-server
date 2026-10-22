@@ -16,7 +16,7 @@ def test_catalog_returns_seeded_products_in_client_shape(client):
     assert p["images"][0]["id"] == "the-black-tracksuit-1"
     assert {"priceKES", "newArrival", "madeToOrder", "sizesNote", "sortOrder"} <= set(p)
     assert "published" not in p  # admin-only field
-    assert client.get("/api/catalog").headers["Cache-Control"].startswith("public, max-age=60, s-maxage=60")
+    assert client.get("/api/catalog").headers["Cache-Control"] == "public, no-cache"
 
 
 def test_hidden_products_are_not_public(admin):
@@ -59,6 +59,27 @@ def test_products_listing_is_card_sized(client):
     assert all(set(c) == TAXONOMY_FIELDS for c in data["categories"] + data["collections"])
 
 
+SQLI_PAYLOADS = [
+    "' OR '1'='1' --",
+    '" OR "1"="1" --',
+    "1 OR 1=1",
+    "' UNION SELECT NULL --",
+    "%' OR '1'='1",
+]
+
+
+@pytest.mark.parametrize("payload", SQLI_PAYLOADS)
+def test_products_listing_ignores_sql_injection_in_query_params(client, payload):
+    """/api/products takes no search param; it must return the full, unaffected catalog
+    and never leak a database error, regardless of what junk is passed as q."""
+    baseline = client.get("/api/products").get_json()
+    res = client.get("/api/products", query_string={"q": payload})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["products"] == baseline["products"]
+    assert len(data["products"]) == 23
+
+
 def test_product_detail_has_the_full_product_and_related_pieces(client):
     data = client.get("/api/products/kenya-bomber-jacket").get_json()
     assert set(data) == {"product", "category", "related", "images"}
@@ -93,8 +114,10 @@ def test_public_routes_are_cdn_cacheable_and_nothing_else_is(admin, client):
     # `client` is signed in as the admin here: its session cookie must not ride on cacheable responses.
     for path in ("/api/settings", "/api/catalog", "/api/home", "/api/products", "/api/products/kenya-bomber-jacket"):
         res = client.get(path)
-        assert res.headers["Cache-Control"] == "public, max-age=60, s-maxage=60", path
-        assert res.headers["CDN-Cache-Control"] == "public, max-age=60, stale-while-revalidate=604800, stale-if-error=604800"
+        # Stored, but checked with the server before every use, so admin changes show at once.
+        assert res.headers["Cache-Control"] == "public, no-cache", path
+        assert res.headers["CDN-Cache-Control"] == "public, max-age=0, must-revalidate, stale-if-error=300"
+        assert res.headers["ETag"], path
         assert "Set-Cookie" not in res.headers, path
         assert "Cookie" not in res.headers.get("Vary", ""), path
 
@@ -477,6 +500,9 @@ def test_site_served_with_spa_fallback(tmp_path):
 def test_sitemap_and_robots(client):
     xml = client.get("/sitemap.xml").get_data(as_text=True)
     assert "/product/kenya-bomber-jacket" in xml and "/shop" in xml
+    assert "/shop/tracksuits" in xml
+    # Every seeded collection holds at least one published piece, so all three are indexable.
+    assert "/collections/kenya" in xml and "/collections/matchday" in xml and "/collections/his-and-hers" in xml
     assert "Sitemap:" in client.get("/robots.txt").get_data(as_text=True)
 
 
