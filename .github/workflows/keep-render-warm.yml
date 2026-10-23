@@ -1,0 +1,25 @@
+name: Keep Render warm
+
+on:
+  schedule:
+    # Render free services sleep after 15 idle minutes. Stagger away from the
+    # top of the hour, when scheduled GitHub Actions are more likely to queue.
+    - cron: '7,19,31,43,55 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ping-health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Request the process health endpoint
+        run: |
+          curl --fail --silent --show-error \
+            --retry 2 \
+            --retry-delay 5 \
+            --max-time 90 \
+            https://snug-co-server.onrender.com/api/health \
+            > /dev/null
