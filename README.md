@@ -170,16 +170,16 @@ The old Supabase Storage bucket (`product-photos`) is only read by `flask migrat
 | `migrations/` | Database migrations |
 | `seed/catalog.json` | Starter catalog loaded by `flask seed` |
 
-## Production: Vercel + Render + Supabase + Cloudinary
+## Production: Cloudflare + Render + Supabase + Cloudinary
 
 ```
-Browser -> Vercel (React site) -> /api rewrite -> https://snug-co-api.onrender.com/api -> Flask
+Browser -> Cloudflare Worker (React site) -> /api proxy -> https://snug-co-server.onrender.com/api -> Flask
 ```
 
 - **Render** runs this server only (`gunicorn wsgi:app`). Run `flask db upgrade` before each deploy (a Render pre-deploy command works).
 - **Supabase** is the PostgreSQL database only, through `DATABASE_URL`. A new database starts empty: no products, categories, shoppers or settings. `flask seed` is optional and is not part of a clean start. Connections to Supabase require TLS, and pooled connections are checked before use.
 - **Cloudinary** stores every product photo under `snug-co/products`.
-- **Vercel** serves the site and proxies `/api/*` to Render (`client/vercel.json`), so the browser only talks to the site's own domain and the admin cookie stays first-party.
+- **Cloudflare Workers** serves the live site and proxies `/api/*` to Render (`client/wrangler.jsonc` and `client/worker/index.js`), so the browser only talks to the site's own domain and the admin cookie stays first-party. `client/vercel.json` provides the same behaviour if the frontend is hosted on Vercel later.
 
 Environment variables on Render:
 
@@ -189,7 +189,7 @@ Environment variables on Render:
 | `DATABASE_URL` | the Supabase PostgreSQL connection string |
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` | from the Cloudinary console |
 | `IMAGE_DELIVERY` | `cloudinary` |
-| `ALLOWED_ORIGINS` | the site's exact origin(s), e.g. `https://www.snugandco.co.ke`. Needed because Vercel forwards the browser's `Origin` but Render sees its own host. |
+| `ALLOWED_ORIGINS` | the site's exact origin(s), e.g. `https://www.snugandco.co.ke`. Needed because the frontend proxy forwards the browser's `Origin` but Render sees its own host. |
 | `TRUSTED_PROXIES` | `1` |
 | `SITE_URL` | the public site address, for the sitemap |
 
@@ -227,7 +227,7 @@ These are set by tracked code or documentation, not by a dashboard:
 These are not in the repository and must be read from the hosting dashboards. Nothing below is a known value:
 
 - Render: plan, region, the actual start command, the Gunicorn worker count, the Gunicorn timeout (not set in the repo, so the Gunicorn default applies unless the dashboard sets one), the health-check path (should be `/api/health`), the deployed branch, and whether a pre-deploy `flask db upgrade` is configured.
-- Vercel: the production branch and the environment variable names set for the client build.
+- Cloudflare: the production branch or deploy workflow, custom domains, Worker variables and the account that owns the deployment. If Vercel remains connected, verify its production branch and build variables too.
 - Supabase: the plan, the connection limit for that plan, whether the app uses the direct or the pooled connection string, and backup retention.
 - Cloudinary: whether backups are enabled on the account.
 
@@ -235,4 +235,4 @@ Record each answer here once confirmed, with the date.
 
 ### Legacy `render.yaml` (not the deployment definition)
 
-A `render.yaml` sits in the project folder above both repositories. **It is not the current deployment definition and must not be applied.** It describes an older setup (a single Render web service, a 1 GB disk with `UPLOAD_DIR`, and a Render-hosted PostgreSQL database). Production uses Vercel, Render running this server only, Supabase, and Cloudinary, as described above. No runtime code, deployment script, build configuration or tracked deployment definition in either repository uses it; the only tracked references are the warnings in these READMEs. Applying it as a Render Blueprint would create new services, a disk and a database. Remove it once the production configuration above is verified.
+A `render.yaml` sits in the project folder above both repositories. **It is not the current deployment definition and must not be applied.** It describes an older setup (a single Render web service, a 1 GB disk with `UPLOAD_DIR`, and a Render-hosted PostgreSQL database). Production uses Cloudflare, Render running this server only, Supabase, and Cloudinary, as described above. No runtime code, deployment script, build configuration or tracked deployment definition in either repository uses it; the only tracked references are the warnings in these READMEs. Applying it as a Render Blueprint would create new services, a disk and a database. Remove it once the production configuration above is verified.
