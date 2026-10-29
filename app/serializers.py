@@ -65,8 +65,10 @@ def product_json(p, admin=False):
         "description": p.description,
         "priceKES": p.price_kes,
         "compareAtPriceKES": p.compare_at_price_kes,
-        "images": [{"id": i.id, "alt": i.alt} for i in p.images],
+        "images": [{"id": i.id, "alt": i.alt} for i in p.gallery],
+        "variationType": p.variation,
         "colors": p.colors or None,
+        "designs": p.designs or None,
         "sizes": p.sizes or None,
         "sizesNote": p.sizes_note,
         "options": p.options or [],
@@ -89,6 +91,11 @@ def product_json(p, admin=False):
     return data
 
 
+def design_image_ids(products):
+    """Photo ids of every design the given products offer."""
+    return [d["image"] for p in products for d in p.designs or [] if d.get("image")]
+
+
 def product_summary(p):
     """What a product card, search and the bag need: no ordering details, first two photos only."""
     return {
@@ -99,7 +106,7 @@ def product_summary(p):
         "collections": [c.slug for c in p.collections],
         "description": p.description,
         "priceKES": p.price_kes,
-        "images": [{"id": i.id, "alt": i.alt} for i in p.images[:2]],
+        "images": [{"id": i.id, "alt": i.alt} for i in p.gallery[:2]],
         "sizes": p.sizes or None,
         "tags": p.tags or [],
         "availability": p.availability,
@@ -113,8 +120,9 @@ def product_summary(p):
 
 def order_check(p):
     """What an order is checked against right before WhatsApp opens: never cached. The choices are
-    included so a customer's colour, size or option can be checked against what's offered now."""
-    return {
+    included so a customer's colour, size or option can be checked against what's offered now.
+    Designs are added only for a design product, so every other piece reads as it always has."""
+    data = {
         "id": f"p{p.id}",
         "slug": p.slug,
         "name": p.name,
@@ -126,6 +134,9 @@ def order_check(p):
         "sizesNote": p.sizes_note,
         "options": p.options or [],
     }
+    if p.designs:
+        data["designs"] = p.designs
+    return data
 
 
 SETTINGS_IMAGES =("hero_image", "feature_image", "feature_image_small")

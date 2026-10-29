@@ -1,7 +1,7 @@
 from collections import namedtuple
 
 from flask import Blueprint, current_app, jsonify, request
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import joinedload
 
 from ..errors import ApiError, ValidationError
@@ -19,7 +19,7 @@ from ..images import (
 from ..models import Category, Collection, Product, ProductImage, SiteSettings, product_collections, with_relations
 from ..security import login_required
 from ..serializers import SETTINGS_IMAGES, image_registry, product_json, settings_json, taxonomy_json
-from ..validation import clean_product, clean_settings, clean_taxonomy, slugify
+from ..validation import MAX_DESIGNS, clean_product, clean_settings, clean_taxonomy, slugify
 
 bp = Blueprint("admin", __name__, url_prefix="/api/admin")
 bp.before_request(login_required(lambda: None))
@@ -34,7 +34,9 @@ PRODUCT_FIELDS = {
     "description": "description",
     "priceKES": "price_kes",
     "compareAtPriceKES": "compare_at_price_kes",
+    "variationType": "variation_type",
     "colors": "colors",
+    "designs": "designs",
     "sizes": "sizes",
     "sizesNote": "sizes_note",
     "options": "options",
@@ -98,6 +100,45 @@ def apply_product(product, cleaned):
     for key, column in PRODUCT_FIELDS.items():
         if key in cleaned:
             setattr(product, column, cleaned[key])
+    normalize_variation(product, cleaned)
+
+
+def normalize_variation(product, cleaned):
+    """Keeps variation_type, colors and designs consistent: only the chosen type keeps its list.
+    A request that sends colours but no variationType (an older admin page) still means colour."""
+    if cleaned.get("variationType") is None and cleaned.get("colors") and product.variation_type != "design":
+        product.variation_type = "color"
+    kind = product.variation_type
+    if kind not in ("color", "design"):
+        # "none" was chosen, or nothing was (an older product): then colours alone mean colour.
+        kind = "color" if kind is None and product.colors else None
+    if kind == "color" and not product.colors:
+        kind = None
+    product.variation_type = kind
+    if kind != "color":
+        product.colors = None
+    if kind != "design":
+        product.designs = None
+
+
+def check_designs(product):
+    """Each design's photo must be one of this product's design photos."""
+    owned = {i.id for i in product.design_images}
+    for design in product.designs or []:
+        if design["image"] not in owned:
+            raise ValidationError({"designs": f"Upload a photo for “{design['name']}” again."})
+
+
+def drop_unused_design_photos(product):
+    """Design photos no design uses any more (a design removed, or its photo replaced)."""
+    used = {d["image"] for d in product.designs or []}
+    unused = [i for i in product.design_images if i.id not in used]
+    if not unused:
+        return []
+    photos = stored_photos(unused)
+    for image in unused:
+        db.session.delete(image)
+    return photos
 
 
 def move_in_order(model, item, direction):
@@ -167,6 +208,9 @@ def list_products():
 def create_product():
     cleaned = clean_product(request.get_json(silent=True))
     category, collections = resolve_taxonomy(cleaned["category"], cleaned.get("collections"))
+    if cleaned.get("designs"):
+        # A new product has no design photos yet: they are uploaded once it exists.
+        raise ValidationError({"designs": "Save the product first, then add each design’s photo."})
 
     wanted = cleaned.get("slug") or slugify(cleaned["name"])
     if not wanted:
@@ -212,7 +256,11 @@ def update_product(product_id):
         product.price_kes is None or product.compare_at_price_kes <= product.price_kes
     ):
         raise ValidationError({"compareAtPriceKES": "The compare-at price must be higher than the price."})
+    check_designs(product)
+    dropped = drop_unused_design_photos(product) if {"designs", "variationType"} & cleaned.keys() else []
     db.session.commit()
+    remove_stored_files(dropped)
+    db.session.expire(product, ["images"])
     return jsonify(product_payload(product))
 
 
@@ -252,8 +300,15 @@ def upload_images(product_id):
     files = request.files.getlist("files")
     if not files:
         raise ApiError(422, "Choose at least one photo.")
-    limit = current_app.config["MAX_IMAGES_PER_PRODUCT"]
-    if len(product.images) + len(files) > limit:
+    role = request.form.get("role", "gallery")
+    if role not in ("gallery", "design"):
+        raise ApiError(422, "Role must be gallery or design.")
+    if role == "design":
+        # A design photo is part of the design, not the product's gallery, and is limited by the designs.
+        limit, existing = MAX_DESIGNS * 2, product.design_images
+    else:
+        limit, existing = current_app.config["MAX_IMAGES_PER_PRODUCT"], product.gallery
+    if len(existing) + len(files) > limit:
         raise ApiError(422, f"A product can have up to {limit} photos. Remove some first.")
     try:
         focus = float(request.form.get("focus", 0.4))
@@ -283,9 +338,10 @@ def upload_images(product_id):
         except ApiError as err:
             raise ApiError(err.status, f"“{upload.filename}”: {err.message}")
 
-    position = max((i.position for i in product.images), default=-1) + 1
+    position = max((i.position for i in existing), default=-1) + 1
+    before = {i.id for i in product.images}
     if cloud:
-        save_to_cloudinary(cloud, product, prepared, position)
+        save_to_cloudinary(cloud, product, prepared, position, role)
     else:
         for widths, blobs in prepared:
             image_id = new_image_id()
@@ -297,6 +353,7 @@ def upload_images(product_id):
                     product=product,
                     position=position,
                     alt=product.name,
+                    role=role,
                     is_upload=True,
                     widths=widths,
                     width=width,
@@ -305,10 +362,12 @@ def upload_images(product_id):
             )
             position += 1
         db.session.commit()
-    return jsonify(product_payload(product)), 201
+    payload = product_payload(product)
+    payload["uploaded"] = [i.id for i in product.images if i.id not in before]
+    return jsonify(payload), 201
 
 
-def save_to_cloudinary(cloud, product, prepared, position):
+def save_to_cloudinary(cloud, product, prepared, position, role="gallery"):
     """Upload originals, then save their rows. On any failure, nothing is kept."""
     uploaded = []
     try:
@@ -322,6 +381,7 @@ def save_to_cloudinary(cloud, product, prepared, position):
                     product=product,
                     position=position,
                     alt=product.name,
+                    role=role,
                     is_upload=True,
                     width=w,
                     height=h,
@@ -360,7 +420,7 @@ def update_image(product_id, image_id):
 def order_images(product_id):
     product = get_or_404(Product, product_id, "product")
     ids = (request.get_json(silent=True) or {}).get("ids")
-    current = {i.id: i for i in product.images}
+    current = {i.id: i for i in product.gallery}
     if not isinstance(ids, list) or sorted(ids) != sorted(current):
         raise ApiError(422, "Send every photo of this product exactly once.")
     for position, image_id in enumerate(ids):
@@ -375,6 +435,8 @@ def delete_image(product_id, image_id):
     if image is None:
         raise ApiError(404, "That photo doesn’t exist.")
     product = image.product
+    if image.role == "design" and any(d["image"] == image_id for d in product.designs or []):
+        raise ApiError(409, "That photo belongs to a design. Remove or change the design instead.")
     photos = stored_photos([image])
     Category.query.filter_by(image_id=image_id).update({"image_id": None})
     Collection.query.filter_by(image_id=image_id).update({"image_id": None})
@@ -383,7 +445,7 @@ def delete_image(product_id, image_id):
     db.session.delete(image)
     db.session.flush()
     db.session.expire(product, ["images"])
-    for position, remaining in enumerate(product.images):
+    for position, remaining in enumerate(product.gallery):
         remaining.position = position
     db.session.commit()
     remove_stored_files(photos)
@@ -396,6 +458,7 @@ def list_images():
     # The product is loaded with the photos, so naming each row needs no query of its own.
     rows = (
         ProductImage.query.options(joinedload(ProductImage.product))
+        .filter(or_(ProductImage.role.is_(None), ProductImage.role != "design"))
         .order_by(ProductImage.product_id, ProductImage.position)
         .all()
     )

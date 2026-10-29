@@ -71,6 +71,10 @@ class Product(db.Model):
     price_kes = db.Column(db.Integer)
     compare_at_price_kes = db.Column(db.Integer)
     colors = db.Column(db.JSON)  # [{name, swatch: [#hex, #hex?]}] or null
+    # "color", "design" or null. Null reads as colour when the product has colours, else none.
+    variation_type = db.Column(db.String(10))
+    # [{name, image: <ProductImage id>, available}] or null. The photos are ProductImage rows with role "design".
+    designs = db.Column(db.JSON)
     sizes = db.Column(db.JSON)  # ["S", "M"] or null
     sizes_note = db.Column(db.String(200))
     options = db.Column(db.JSON, default=list, nullable=False)  # [{name, values|type:text, required}]
@@ -101,6 +105,21 @@ class Product(db.Model):
         order_by="ProductImage.position",
     )
 
+    @property
+    def gallery(self):
+        """The product's own photos. Design photos are stored beside them but belong to a design."""
+        return [i for i in self.images if i.role != "design"]
+
+    @property
+    def design_images(self):
+        return [i for i in self.images if i.role == "design"]
+
+    @property
+    def variation(self):
+        if self.variation_type in ("color", "design"):
+            return self.variation_type
+        return "color" if self.colors else "none"
+
 
 class SiteSettings(db.Model):
     """Single row of site-wide settings."""
@@ -130,6 +149,8 @@ class ProductImage(db.Model):
     # Size of the 4:5 photo as shown.
     width = db.Column(db.Integer)
     height = db.Column(db.Integer)
+    # "gallery" (null counts as gallery) or "design": the photo of one of the product's designs.
+    role = db.Column(db.String(10))
     cloudinary_public_id = db.Column(db.String(255), index=True)
     cloudinary_version = db.Column(db.BigInteger)
     # Top-left of the 4:5 crop inside the Cloudinary original (null: the original is already 4:5).

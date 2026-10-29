@@ -65,12 +65,12 @@ def _published():
 
 
 def _summary_images(products):
-    return [i.id for p in products for i in p.images[:2]]
+    return [i.id for p in products for i in p.gallery[:2]]
 
 
 def _loaded_images(products):
     """Photo rows already fetched with the products, so the registry needn't query them again."""
-    return [i for p in products for i in p.images]
+    return [i for p in products for i in p.images]  # design photos too, so their metadata needs no query
 
 
 @bp.get("/health")
@@ -114,7 +114,7 @@ def catalog():
     categories = Category.query.order_by(Category.sort_order, Category.id).all()
     collections = Collection.query.order_by(Collection.sort_order, Collection.id).all()
 
-    image_ids = [i.id for p in products for i in p.images]
+    image_ids = [i.id for p in products for i in p.images]  # gallery and design photos
     image_ids += [c.image_id for c in categories] + [c.image_id for c in collections]
 
     return _public(
@@ -137,7 +137,7 @@ def home():
         counts[p.category_id] = counts.get(p.category_id, 0) + 1
     categories = [c for c in Category.query.order_by(Category.sort_order, Category.id).all() if counts.get(c.id)]
     new_arrivals = [p for p in products if p.new_arrival][:HOME_NEW_ARRIVALS]
-    pair = [p for p in products if p.images and any(c.slug == "his-and-hers" for c in p.collections)][:2]
+    pair = [p for p in products if p.gallery and any(c.slug == "his-and-hers" for c in p.collections)][:2]
 
     return _public(
         {

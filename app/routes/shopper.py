@@ -12,7 +12,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from ..errors import ApiError, ValidationError
 from ..models import Product
-from ..serializers import order_check
+from ..serializers import design_image_ids, image_registry, order_check
 
 bp = Blueprint("shopper", __name__, url_prefix="/api/shopper")
 
@@ -71,7 +71,7 @@ def respond(state, changed=False):
     changed = changed or len(wishlist) != len(state["w"]) or len(cart) != len(state["c"])
     state = {"w": wishlist, "c": cart}
 
-    response = jsonify(
+    payload = (
         {
             "wishlist": [f"p{i}" for i in wishlist],
             "cart": [
@@ -83,7 +83,11 @@ def respond(state, changed=False):
                     "options": line.get("o") or {},
                     "quantity": line["q"],
                     # Why this line's choices no longer fit the piece, by field. Empty when they do.
-                    "issues": choice_issues(products[line["p"]], line.get("color"), line.get("size"), line.get("o") or {}),
+                    "issues": choice_issues(
+                        products[line["p"]], line.get("color"), line.get("size"), line.get("o") or {}, line.get("design")
+                    ),
+                    # Only designs have this key, so a bag with none reads exactly as it did before designs.
+                    **({"design": line["design"]} if line.get("design") else {}),
                 }
                 for line in cart
             ],
@@ -92,6 +96,11 @@ def respond(state, changed=False):
             "products": {f"p{i}": order_check(products[i]) for i in dict.fromkeys(wishlist + [line["p"] for line in cart])},
         }
     )
+    # Photos of the designs in the bag, so the bag can show which design each line is.
+    images = image_registry(design_image_ids(products[line["p"]] for line in cart if line.get("design")))
+    if images:
+        payload["images"] = images
+    response = jsonify(payload)
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Vary"] = "Cookie"
     if changed:
@@ -127,10 +136,11 @@ def clean_quantity(value):
 
 
 def choices_from_body(product, body):
-    """The colour, size and options a customer sent, in the form the cart keeps. A choice the
+    """The colour, design, size and options a customer sent, in the form the cart keeps. A choice the
     product has no list for is dropped; a value the product doesn't offer is kept, so
     choice_issues can report it."""
     color = (body.get("color") or None) if product.colors else None
+    design = (body.get("design") or None) if product.designs else None
     size = (body.get("size") or None) if product.sizes else None
     sent = body.get("options") if isinstance(body.get("options"), dict) else {}
     options = {}
@@ -140,10 +150,10 @@ def choices_from_body(product, body):
         value = value.strip() if isinstance(value, str) else ""
         if value:
             options[name] = value
-    return color, size, options
+    return color, size, options, design
 
 
-def choice_issues(product, color, size, options):
+def choice_issues(product, color, size, options, design=None):
     """Why a colour, size and options no longer fit the product, by field. Empty when they do.
     Checked against the product as it is now, so a choice an admin removed or changed is reported."""
     issues = {}
@@ -155,6 +165,16 @@ def choice_issues(product, color, size, options):
             issues["color"] = "That colour is no longer available. Choose another."
     elif color is not None:
         issues["color"] = "This piece no longer has colour choices."
+    designs = {d["name"]: d for d in product.designs or []}
+    if designs:
+        if design is None:
+            issues["design"] = "Choose a design to continue."
+        elif design not in designs:
+            issues["design"] = "That design is no longer available. Choose another."
+        elif not designs[design].get("available", True):
+            issues["design"] = "That design is sold out. Choose another."
+    elif design is not None:
+        issues["design"] = "This piece no longer has design choices."
     if product.sizes:
         if size is None:
             issues["size"] = "Choose a size to continue."
@@ -187,15 +207,20 @@ def choice_issues(product, color, size, options):
 
 def clean_choices(product, body):
     """The colour, size and options for a cart line, checked against the product now."""
-    color, size, options = choices_from_body(product, body)
-    issues = choice_issues(product, color, size, options)
+    color, size, options, design = choices_from_body(product, body)
+    issues = choice_issues(product, color, size, options, design)
     if issues:
         raise ValidationError(issues)
-    return color, size, options
+    return color, size, options, design
 
 
-def same_choices(line, color, size, options):
-    return line.get("color") == color and line.get("size") == size and (line.get("o") or {}) == options
+def same_choices(line, color, size, options, design=None):
+    return (
+        line.get("color") == color
+        and line.get("design") == design
+        and line.get("size") == size
+        and (line.get("o") or {}) == options
+    )
 
 
 @bp.get("")
@@ -241,13 +266,13 @@ def check_order():
         if product is None:
             results.append({"productId": f"p{pk}", "orderable": False, "issues": {}})
             continue
-        color, size, options = choices_from_body(product, item)
+        color, size, options, design = choices_from_body(product, item)
         products[f"p{product.id}"] = order_check(product)
         results.append(
             {
                 "productId": f"p{product.id}",
                 "orderable": product.availability not in UNORDERABLE,
-                "issues": choice_issues(product, color, size, options),
+                "issues": choice_issues(product, color, size, options, design),
             }
         )
     response = jsonify({"products": products, "items": results})
@@ -289,12 +314,12 @@ def add_to_cart():
     product = find_product(body.get("productId"))
     if product.availability in UNORDERABLE:
         raise ApiError(409, "That piece can’t be ordered right now.")
-    color, size, options = clean_choices(product, body)
+    color, size, options, design = clean_choices(product, body)
     quantity = clean_quantity(body.get("quantity", 1))
 
     state = load_state()
     for line in state["c"]:
-        if line["p"] == product.id and same_choices(line, color, size, options):
+        if line["p"] == product.id and same_choices(line, color, size, options, design):
             line["q"] = min(MAX_QUANTITY, line["q"] + quantity)
             return respond(state, changed=True)
     if len(state["c"]) >= MAX_LINES:
@@ -302,6 +327,8 @@ def add_to_cart():
     line = {"k": secrets.token_hex(4), "p": product.id, "q": quantity}
     if color:
         line["color"] = color
+    if design:
+        line["design"] = design
     if size:
         line["size"] = size
     if options:
@@ -326,7 +353,7 @@ def update_cart_line(key):
         raise ApiError(400, "Send the quantity or your new choices.")
     state = load_state()
     line = find_line(state, key)
-    changes_choices = any(name in body for name in ("color", "size", "options"))
+    changes_choices = any(name in body for name in ("color", "design", "size", "options"))
     if "quantity" in body or not changes_choices:
         line["q"] = clean_quantity(body.get("quantity"))
     if changes_choices:
@@ -335,20 +362,22 @@ def update_cart_line(key):
             raise ApiError(404, "That piece isn’t available.")
         if product.availability in UNORDERABLE:
             raise ApiError(409, "That piece can’t be ordered right now.")
-        color, size, options = clean_choices(product, body)
+        color, size, options, design = clean_choices(product, body)
         twin = next(
             (other for other in state["c"] if other["k"] != line["k"] and other["p"] == line["p"]
-             and same_choices(other, color, size, options)),
+             and same_choices(other, color, size, options, design)),
             None,
         )
         if twin is not None:
             twin["q"] = min(MAX_QUANTITY, twin["q"] + line["q"])
             state["c"] = [other for other in state["c"] if other["k"] != line["k"]]
         else:
-            for name in ("color", "size", "o"):
+            for name in ("color", "design", "size", "o"):
                 line.pop(name, None)
             if color:
                 line["color"] = color
+            if design:
+                line["design"] = design
             if size:
                 line["size"] = size
             if options:
