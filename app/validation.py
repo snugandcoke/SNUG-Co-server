@@ -10,6 +10,8 @@ SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 AVAILABILITY = ("available", "low-stock", "sold-out", "coming-soon")
+VARIATION_TYPES = ("none", "color", "design")
+MAX_DESIGNS = 12
 BADGES = ("new", "bestseller", "limited", "sold-out")
 MAX_PRICE = 10_000_000
 
@@ -214,6 +216,41 @@ class Cleaner:
             cleaned.append({"name": name, "swatch": [s.lower() for s in swatch]})
         self.out[key] = cleaned
 
+    def designs(self, key="designs"):
+        """[{name, image, available}]. Whether each image is one of this product's design photos is
+        checked by the route, which can see the product."""
+        present, value = self._present(key, None)
+        if not present:
+            return
+        if value in (None, []):
+            self.out[key] = None
+            return
+        if not isinstance(value, list) or len(value) > MAX_DESIGNS:
+            self.errors[key] = f"Add up to {MAX_DESIGNS} designs."
+            return
+        cleaned, names = [], set()
+        for entry in value:
+            entry = entry if isinstance(entry, dict) else {}
+            name = entry.get("name")
+            name = name.strip() if isinstance(name, str) else ""
+            image = entry.get("image")
+            available = entry.get("available", True)
+            if not name or len(name) > 40:
+                self.errors[key] = "Give every design a name of up to 40 characters."
+                return
+            if name.lower() in names:
+                self.errors[key] = f"“{name}” is listed twice."
+                return
+            names.add(name.lower())
+            if not isinstance(image, str) or not image or len(image) > 80:
+                self.errors[key] = f"Add a photo for “{name}”."
+                return
+            if not isinstance(available, bool):
+                self.errors[key] = f"Choose whether “{name}” is available."
+                return
+            cleaned.append({"name": name, "image": image, "available": available})
+        self.out[key] = cleaned
+
     def options(self, key="options"):
         present, value = self._present(key, [])
         if not present:
@@ -278,7 +315,9 @@ def clean_product(data, partial=False):
     c.str_list("collections", max_items=10, item_len=80)
     c.integer("priceKES")
     c.integer("compareAtPriceKES")
+    c.choice("variationType", VARIATION_TYPES, nullable=True)
     c.colors()
+    c.designs()
     c.str_list("sizes", max_items=20, item_len=12, nullable=True)
     c.text("sizesNote", max_len=200)
     c.options()

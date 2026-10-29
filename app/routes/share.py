@@ -164,7 +164,7 @@ def product(slug):
     item = Product.query.filter_by(slug=slug, published=True).first()
     if item is None:
         abort(404)
-    image = _image_for(item.images[0]) if item.images else None
+    image = _image_for(item.gallery[0]) if item.gallery else None
     price = f"KSh {item.price_kes:,}. " if item.price_kes is not None else ""
     # Real colour names from the product's own data, when it has any - never invented.
     colors = ", ".join(c["name"] for c in item.colors) if item.colors else None
