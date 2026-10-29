@@ -102,7 +102,7 @@ def create_app(test_config=None):
         from .models import Category, Collection, Product
 
         base = site_url()
-        urls = [(f"{base}{p}", None) for p in ("/", "/shop", "/about", "/contact", "/shipping-and-orders")]
+        urls = [(f"{base}{p}", None) for p in ("/", "/shop", "/about", "/contact", "/size-guide", "/shipping-and-orders")]
         urls += [(f"{base}/shop/{c.slug}", None) for c in Category.query.all()]
         # Only collections that actually hold a published piece - no empty landing pages indexed.
         urls += [
