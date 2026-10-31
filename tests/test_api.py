@@ -268,6 +268,39 @@ def test_create_product_appears_first_and_gets_a_slug(admin):
     assert min(p["recency"] for p in public) == public[0]["recency"]
 
 
+import pytest
+
+
+@pytest.mark.parametrize(
+    "sent, expected",
+    [
+        (None, []),
+        ([], []),
+        ([""], []),
+        (["green"], ["green"]),
+        (["green, sage"], ["green", "sage"]),
+        (["green;sage"], ["green", "sage"]),
+        (["green\nsage\r\ntracksuit"], ["green", "sage", "tracksuit"]),
+        (["green", "Green", " GREEN "], ["green"]),
+        (["  green  ,, ; sage ; "], ["green", "sage"]),
+        ("green, sage", ["green", "sage"]),
+    ],
+)
+def test_search_words_are_normalised(admin, sent, expected):
+    body = {**NEW_PRODUCT, "slug": None}
+    if sent is not None:
+        body["tags"] = sent
+    res = admin.post("/api/admin/products", json=body, headers=HEADERS)
+    assert res.status_code == 201
+    assert res.get_json()["product"]["tags"] == expected
+
+
+def test_search_words_over_40_characters_name_the_keyword(admin):
+    res = admin.post("/api/admin/products", json={**NEW_PRODUCT, "tags": ["ok", "x" * 41]}, headers=HEADERS)
+    assert res.status_code == 422
+    assert "too long" in res.get_json()["fields"]["tags"]
+
+
 def test_create_validation_reports_each_field(admin):
     res = admin.post(
         "/api/admin/products",

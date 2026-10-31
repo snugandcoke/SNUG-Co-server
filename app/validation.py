@@ -13,6 +13,7 @@ AVAILABILITY = ("available", "low-stock", "sold-out", "coming-soon")
 VARIATION_TYPES = ("none", "color", "design")
 MAX_DESIGNS = 12
 BADGES = ("new", "bestseller", "limited", "sold-out")
+KEYWORD_SPLIT_RE = re.compile(r"[,;\n\r]+")
 MAX_PRICE = 10_000_000
 
 
@@ -113,16 +114,24 @@ class Cleaner:
             return
         self.out[key] = value
 
-    def str_list(self, key, *, max_items, item_len, nullable=False, lower=False, unique=True):
+    def str_list(self, key, *, max_items, item_len, nullable=False, lower=False, unique=True, split=False):
         present, value = self._present(key, None if nullable else [])
         if not present:
             return
         if value is None:
             self.out[key] = None if nullable else []
             return
-        if not isinstance(value, list) or len(value) > max_items:
+        if split and isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
             self.errors[key] = f"Add up to {max_items} items."
             return
+        if split:
+            # Keywords may arrive comma-, semicolon- or newline-separated.
+            if not all(isinstance(raw, str) for raw in value):
+                self.errors[key] = "Each item must be text."
+                return
+            value = [part for raw in value for part in KEYWORD_SPLIT_RE.split(raw)]
         items = []
         for raw in value:
             if not isinstance(raw, str):
@@ -132,7 +141,8 @@ class Cleaner:
             if not item:
                 continue
             if len(item) > item_len:
-                self.errors[key] = f"Keep each item under {item_len} characters."
+                shown = item if len(item) <= 30 else item[:30] + "…"
+                self.errors[key] = f"“{shown}” is too long. Keep each item under {item_len} characters."
                 return
             items.append(item)
         if unique:
@@ -142,6 +152,9 @@ class Cleaner:
                     seen.add(item.lower())
                     deduped.append(item)
             items = deduped
+        if len(items) > max_items:
+            self.errors[key] = f"Add up to {max_items} items."
+            return
         self.out[key] = items or (None if nullable else [])
 
     def url(self, key):
@@ -324,7 +337,7 @@ def clean_product(data, partial=False):
     c.str_list("details", max_items=12, item_len=200)
     c.text("material", max_len=200)
     c.text("care", max_len=400)
-    c.str_list("tags", max_items=30, item_len=40, lower=True)
+    c.str_list("tags", max_items=30, item_len=40, lower=True, split=True)
     c.choice("availability", AVAILABILITY, default="available")
     c.choice("badge", BADGES, nullable=True)
     c.boolean("madeToOrder", False)
