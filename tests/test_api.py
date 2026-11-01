@@ -16,7 +16,7 @@ def test_catalog_returns_seeded_products_in_client_shape(client):
     assert p["images"][0]["id"] == "the-black-tracksuit-1"
     assert {"priceKES", "newArrival", "madeToOrder", "sizesNote", "sortOrder"} <= set(p)
     assert "published" not in p  # admin-only field
-    assert client.get("/api/catalog").headers["Cache-Control"] == "public, no-cache"
+    assert client.get("/api/catalog").headers["Cache-Control"] == "public, max-age=60, stale-while-revalidate=300"
 
 
 def test_hidden_products_are_not_public(admin):
@@ -115,8 +115,12 @@ def test_public_routes_are_cdn_cacheable_and_nothing_else_is(admin, client):
     for path in ("/api/settings", "/api/catalog", "/api/home", "/api/products", "/api/products/kenya-bomber-jacket"):
         res = client.get(path)
         # Stored, but checked with the server before every use, so admin changes show at once.
-        assert res.headers["Cache-Control"] == "public, no-cache", path
-        assert res.headers["CDN-Cache-Control"] == "public, max-age=0, must-revalidate, stale-if-error=300"
+        if path == "/api/catalog":  # the one route allowed to be served briefly without asking
+            assert res.headers["Cache-Control"] == "public, max-age=60, stale-while-revalidate=300"
+            assert res.headers["CDN-Cache-Control"] == "public, max-age=60, stale-while-revalidate=300, stale-if-error=300"
+        else:
+            assert res.headers["Cache-Control"] == "public, no-cache", path
+            assert res.headers["CDN-Cache-Control"] == "public, max-age=0, must-revalidate, stale-if-error=300"
         assert res.headers["ETag"], path
         assert "Set-Cookie" not in res.headers, path
         assert "Cookie" not in res.headers.get("Vary", ""), path
@@ -536,7 +540,30 @@ def test_sitemap_and_robots(client):
     assert "/shop/tracksuits" in xml
     # Every seeded collection holds at least one published piece, so all three are indexable.
     assert "/collections/kenya" in xml and "/collections/matchday" in xml and "/collections/his-and-hers" in xml
-    assert "Sitemap:" in client.get("/robots.txt").get_data(as_text=True)
+    assert "Sitemap: https://snugandco.co.ke/sitemap.xml" in client.get("/robots.txt").get_data(as_text=True)
+
+
+def test_sitemap_uses_only_the_official_domain(client):
+    import re
+
+    # Even when the request arrives on a Render or Workers hostname, as it does behind the proxy.
+    for host in ("snug-co-server.onrender.com", "snug-co-client.snugandco-ke.workers.dev"):
+        xml = client.get("/sitemap.xml", base_url=f"https://{host}").get_data(as_text=True)
+        locs = re.findall(r"<loc>([^<]+)</loc>", xml)
+        assert locs and all(loc.startswith("https://snugandco.co.ke/") for loc in locs)
+        assert not any(bad in loc for loc in locs for bad in ("/admin", "/api", "/cart", "/wishlist", "/share"))
+        assert "onrender.com" not in xml and "workers.dev" not in xml
+        robots = client.get("/robots.txt", base_url=f"https://{host}").get_data(as_text=True)
+        assert "onrender.com" not in robots and "workers.dev" not in robots
+
+
+def test_site_url_env_on_a_hosting_hostname_is_ignored():
+    from app.config import canonical_site_url
+
+    assert canonical_site_url("") == "https://snugandco.co.ke"
+    assert canonical_site_url("https://snug-co-server.onrender.com") == "https://snugandco.co.ke"
+    assert canonical_site_url("https://x.snugandco-ke.workers.dev/") == "https://snugandco.co.ke"
+    assert canonical_site_url("https://shop.example.co.ke/") == "https://shop.example.co.ke"
 
 
 def test_supabase_storage_verifies_ssl_and_sends_expected_request(monkeypatch):
@@ -726,3 +753,25 @@ def test_catalog_uses_a_fixed_number_of_queries(app, client):
         finally:
             event.remove(engine, "before_cursor_execute", listener)
         assert len(count) <= 8, f"{path}: {len(count)} queries; each is a slow round trip in production"
+
+
+def test_html_on_a_non_canonical_host_is_noindexed_but_the_official_domain_is_not(client):
+    for host in ("snug-co-server.onrender.com", "snug-co-client.snugandco-ke.workers.dev"):
+        res = client.get("/share/product/kenya-bomber-jacket", base_url=f"https://{host}")
+        assert res.status_code == 200 and res.headers["X-Robots-Tag"] == "noindex, follow"
+        # Non-HTML responses are left alone.
+        for path in ("/sitemap.xml", "/robots.txt", "/api/health"):
+            assert "X-Robots-Tag" not in client.get(path, base_url=f"https://{host}").headers, path
+
+    official = client.get("/share/product/kenya-bomber-jacket", base_url="https://snugandco.co.ke")
+    assert "X-Robots-Tag" not in official.headers
+
+
+def test_proxied_traffic_for_the_official_domain_is_not_noindexed_even_though_host_is_render(client):
+    # The Worker and Vercel reach Flask with Host: <render hostname> and name the visitor's host separately.
+    for header in ({"X-Snug-Public-Host": "snugandco.co.ke"}, {"X-Forwarded-Host": "snugandco.co.ke"}):
+        res = client.get("/share/product/kenya-bomber-jacket", base_url="https://snug-co-server.onrender.com", headers=header)
+        assert res.status_code == 200 and "X-Robots-Tag" not in res.headers, header
+    res = client.get("/share/product/kenya-bomber-jacket", base_url="https://snug-co-server.onrender.com",
+                     headers={"X-Snug-Public-Host": "snug-co-client.snugandco-ke.workers.dev"})
+    assert res.headers["X-Robots-Tag"] == "noindex, follow"

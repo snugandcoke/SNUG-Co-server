@@ -39,6 +39,20 @@ def engine_options(uri):
     return {"pool_pre_ping": True, "pool_recycle": 300, "connect_args": connect_args}
 
 
+CANONICAL_SITE_URL = "https://snugandco.co.ke"
+# Hosting hostnames that must never appear in sitemap.xml, robots.txt, canonical or og:url.
+_NON_CANONICAL_HOSTS = (".onrender.com", ".workers.dev", ".vercel.app")
+
+
+def canonical_site_url(value):
+    """The one public origin for SEO output. Unset, or a Render/Workers/Vercel hostname, gives the official domain."""
+    value = (value or "").strip().rstrip("/")
+    host = value.split("://", 1)[-1].split("/", 1)[0].lower()
+    if not value.startswith(("http://", "https://")) or host.endswith(_NON_CANONICAL_HOSTS):
+        return CANONICAL_SITE_URL
+    return value
+
+
 def build_config(overrides=None):
     env = os.environ.get
     debug = env("FLASK_DEBUG", "0") == "1"
@@ -49,7 +63,7 @@ def build_config(overrides=None):
     samesite = env("SESSION_COOKIE_SAMESITE") or "Lax"
 
     config = {
-        "SITE_URL": env("SITE_URL") or env("VITE_SITE_URL") or "",
+        "SITE_URL": canonical_site_url(env("SITE_URL")),
         "SECRET_KEY": env("SECRET_KEY"),
         "DEBUG": debug,
         "SQLALCHEMY_DATABASE_URI": _database_uri(env("DATABASE_URL")),

@@ -90,7 +90,7 @@ def create_app(test_config=None):
         return response
 
     def site_url():
-        return (app.config["SITE_URL"] or request.host_url).rstrip("/")
+        return app.config["SITE_URL"].rstrip("/")
 
     @app.get("/robots.txt")
     def robots():
@@ -135,6 +135,22 @@ def create_app(test_config=None):
             return response
         response = send_from_directory(dist, "index.html")
         response.headers["Cache-Control"] = "no-cache"
+        return response
+
+    def public_hostname():
+        """The hostname the visitor used. The Worker (X-Snug-Public-Host) or Vercel (X-Forwarded-Host)
+        names it when they proxy; the Host header is only trusted when neither is present, i.e. when
+        someone reaches this service's own domain directly. Not request.host: ProxyFix may rewrite it."""
+        forwarded = request.headers.get("X-Snug-Public-Host") or request.headers.get("X-Forwarded-Host") or ""
+        host = forwarded.split(",", 1)[0].strip() or request.headers.get("Host", "")
+        return host.split(":", 1)[0].lower()
+
+    @app.after_request
+    def noindex_non_canonical_hosts(response):
+        # HTML only (the SPA and share pages). The API, sitemap, robots.txt, images and assets are not HTML.
+        # The Cloudflare Worker does the same at the edge; this covers direct hits on the Render hostname.
+        if response.mimetype == "text/html" and public_hostname().endswith((".onrender.com", ".workers.dev")):
+            response.headers["X-Robots-Tag"] = "noindex, follow"
         return response
 
     @app.after_request

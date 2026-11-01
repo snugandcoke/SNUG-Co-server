@@ -26,6 +26,7 @@ import json
 from html import escape
 
 from flask import Blueprint, abort, current_app, request
+from sqlalchemy.orm import joinedload
 
 from ..extensions import db
 from ..images import cloudinary_url
@@ -76,11 +77,43 @@ COLLECTION_SEO = {
 # Link previews may be a minute old. They show prices, so a failing server can't keep an old
 # copy on the CDN for more than five minutes.
 CACHE = "public, max-age=60, s-maxage=60"
+SCHEMA_AVAILABILITY = {
+    "sold-out": "https://schema.org/OutOfStock",
+    "coming-soon": "https://schema.org/PreOrder",
+    "low-stock": "https://schema.org/LimitedAvailability",
+}
 CDN_CACHE = "public, max-age=60, stale-if-error=300"
 
 
+def _read_without_transaction():
+    """Run this request's reads in autocommit, so no BEGIN/ROLLBACK goes to the database.
+
+    The live database is about 140 ms from Render. Inside a transaction psycopg sends BEGIN before
+    the first query and the pool sends ROLLBACK when the connection goes back: two extra round trips
+    on every share page (measured: /api/ready, one SELECT 1, takes ~0.55 s more than /api/health).
+    These routes only read, with a single SELECT each, so autocommit returns the same rows.
+    Does nothing if this request's session has already started a transaction.
+    """
+    session = db.session()  # the request's Session; the scoped proxy doesn't expose in_transaction()
+    if not session.in_transaction():
+        session.connection(execution_options={"isolation_level": "AUTOCOMMIT"})
+
+
+def _taxonomy_with_photo(model, slug):
+    """A category or collection and its cover photo (or None) in one query, or a 404."""
+    row = (
+        db.session.query(model, ProductImage)
+        .outerjoin(ProductImage, ProductImage.id == model.image_id)
+        .filter(model.slug == slug)
+        .first()
+    )
+    if row is None:
+        abort(404)
+    return row
+
+
 def _site_url():
-    return (current_app.config["SITE_URL"] or request.host_url).rstrip("/")
+    return current_app.config["SITE_URL"].rstrip("/")
 
 
 def _absolute(path):
@@ -161,7 +194,13 @@ def _page(*, title, description, path, kind, image, jsonld):
 
 @bp.get("/product/<slug>")
 def product(slug):
-    item = Product.query.filter_by(slug=slug, published=True).first()
+    _read_without_transaction()
+    # Category and photos in the same query: each lazy load would be another round trip.
+    item = (
+        Product.query.options(joinedload(Product.category), joinedload(Product.images))
+        .filter_by(slug=slug, published=True)
+        .first()
+    )
     if item is None:
         abort(404)
     image = _image_for(item.gallery[0]) if item.gallery else None
@@ -184,6 +223,18 @@ def product(slug):
     }
     if colors:
         product_data["color"] = colors
+    if item.material:
+        product_data["material"] = item.material
+    # Same Offer as client/src/pages/Product.jsx's productJsonLd(), so the prerendered page and the
+    # React page describe the product identically.
+    if item.price_kes is not None:
+        offer = {"@type": "Offer", "url": url, "priceCurrency": "KES", "price": item.price_kes}
+        availability = SCHEMA_AVAILABILITY.get(item.availability)
+        if item.made_to_order:
+            offer["availability"] = "https://schema.org/MadeToOrder"
+        if availability:
+            offer["availability"] = availability
+        product_data["offers"] = offer
     breadcrumb = {
         "@context": "https://schema.org",
         "@type": "BreadcrumbList",
@@ -205,10 +256,8 @@ def product(slug):
 
 @bp.get("/category/<slug>")
 def category(slug):
-    item = Category.query.filter_by(slug=slug).first()
-    if item is None:
-        abort(404)
-    photo = db.session.get(ProductImage, item.image_id) if item.image_id else None
+    _read_without_transaction()
+    item, photo = _taxonomy_with_photo(Category, slug)
     image = _image_for(photo)
     seo = CATEGORY_SEO.get(item.slug)
     description = (seo["description"] if seo else item.description) or "Lounge sets, tracksuits, jackets and matchday pieces. Order any piece on WhatsApp."
@@ -232,10 +281,8 @@ def category(slug):
 
 @bp.get("/collection/<slug>")
 def collection(slug):
-    item = Collection.query.filter_by(slug=slug).first()
-    if item is None:
-        abort(404)
-    photo = db.session.get(ProductImage, item.image_id) if item.image_id else None
+    _read_without_transaction()
+    item, photo = _taxonomy_with_photo(Collection, slug)
     image = _image_for(photo)
     seo = COLLECTION_SEO.get(item.slug)
     description = (seo["description"] if seo else item.description) or "Shop this collection from Snug & Co. Order any piece on WhatsApp."
